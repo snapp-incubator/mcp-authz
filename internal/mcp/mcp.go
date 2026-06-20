@@ -26,8 +26,8 @@ type Request struct {
 
 // ToolCallParams holds the tool name and its arguments.
 type ToolCallParams struct {
-	Name      string                 `json:"name"`
-	Arguments map[string]any         `json:"arguments"`
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
 	// Meta is ignored but kept so re-marshalling is lossless if ever needed.
 	Meta json.RawMessage `json:"_meta,omitempty"`
 }

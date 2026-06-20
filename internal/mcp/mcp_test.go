@@ -10,11 +10,11 @@ import (
 
 func TestParse(t *testing.T) {
 	tests := []struct {
-		name       string
-		body       string
-		wantOK     bool
-		wantTool   string
-		wantErr    bool
+		name     string
+		body     string
+		wantOK   bool
+		wantTool string
+		wantErr  bool
 	}{
 		{name: "tools/call", body: `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_flows","arguments":{"namespace":"team-a"}}}`, wantOK: true, wantTool: "get_flows"},
 		{name: "initialize", body: `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, wantOK: false},
@@ -57,9 +57,9 @@ func TestExtractNamespaces(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		args      map[string]any
-		wantNS    []string
+		name         string
+		args         map[string]any
+		wantNS       []string
 		wantUnscoped bool
 	}{
 		{

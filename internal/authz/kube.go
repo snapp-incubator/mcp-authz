@@ -106,10 +106,10 @@ func (k *Kube) ListAllowed(ctx context.Context, sub Subject, act Action) ([]stri
 	}
 
 	var (
-		mu      sync.Mutex
-		allowed []string
-		wg      sync.WaitGroup
-		sem     = make(chan struct{}, k.listConcurrency)
+		mu       sync.Mutex
+		allowed  []string
+		wg       sync.WaitGroup
+		sem      = make(chan struct{}, k.listConcurrency)
 		firstErr error
 	)
 	for _, ns := range nsList.Items {

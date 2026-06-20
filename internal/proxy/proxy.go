@@ -34,10 +34,10 @@ type backend struct {
 
 // Handler enforces authorization in front of the configured MCP servers.
 type Handler struct {
-	engine   *engine.Engine
-	ident    *identity.Extractor
+	engine    *engine.Engine
+	ident     *identity.Extractor
 	requireID bool
-	log      *slog.Logger
+	log       *slog.Logger
 
 	backends map[string]*backend
 	single   *backend // set when exactly one MCP is configured

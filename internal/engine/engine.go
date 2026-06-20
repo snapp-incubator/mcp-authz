@@ -31,11 +31,11 @@ func (e *Engine) Authorizer() authz.Authorizer { return e.authorizer }
 
 // Verdict is the outcome of evaluating a tool call.
 type Verdict struct {
-	Allowed   bool             `json:"allowed"`
-	Reason    string           `json:"reason"`
-	Tool      string           `json:"tool,omitempty"`
-	Namespaces []string        `json:"namespaces,omitempty"`
-	Decisions []authz.Decision `json:"decisions,omitempty"`
+	Allowed    bool             `json:"allowed"`
+	Reason     string           `json:"reason"`
+	Tool       string           `json:"tool,omitempty"`
+	Namespaces []string         `json:"namespaces,omitempty"`
+	Decisions  []authz.Decision `json:"decisions,omitempty"`
 	// Public marks calls that bypassed authorization by policy.
 	Public bool `json:"public,omitempty"`
 }

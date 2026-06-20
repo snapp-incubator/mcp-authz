@@ -50,8 +50,8 @@ type Authorizer struct {
 	// Action is the default RBAC action checked per namespace.
 	Action authz.Action `yaml:"action"`
 
-	Kube   KubeConfig          `yaml:"kube"`
-	Static authz.StaticConfig  `yaml:"static"`
+	Kube   KubeConfig         `yaml:"kube"`
+	Static authz.StaticConfig `yaml:"static"`
 }
 
 // KubeConfig configures the SubjectAccessReview backend.
@@ -148,7 +148,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("authorizer.provider %q invalid (want kube|static|allow)", c.Authorizer.Provider)
 	}
 	if len(c.MCPs) == 0 {
-		return fmt.Errorf("at least one mcp must be configured under mcps:")
+		return fmt.Errorf("at least one mcp must be configured under mcps")
 	}
 	for name, m := range c.MCPs {
 		if strings.TrimSpace(m.Upstream) == "" {
