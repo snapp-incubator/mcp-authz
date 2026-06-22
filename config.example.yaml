@@ -1,44 +1,41 @@
-# mcp-authz example configuration.
+# mcp-authz — SnappCloud Mattermost bot backend.
 #
-# Adding a new MCP server to protect is a config change only — declare its
-# upstream and which tool arguments carry a namespace. The decision engine and
-# enforcement proxy are reused unchanged.
+# The bot listens on the Mattermost WebSocket, authenticates the chatting user
+# (real SSO identity), checks whether they are authorized for their query
+# (OpenShift RBAC), and only then forwards it to the Dify workflow.
+#
+# Secrets (the Mattermost bot token and the Dify API key) are NOT stored here —
+# they are read from the environment variables named below.
 
-identity:
-  # Headers injected by the upstream auth proxy / chatbot. First non-empty wins.
-  # X-User-Id carries the end-user identity Mattermost sends to Dify and Dify
-  # forwards here (must be the OpenShift username/email, not a raw chat user id).
-  userHeaders:
-    - X-User-Id
-    - X-Forwarded-Email
-    - X-Forwarded-User
-    - X-Auth-Request-Email
-  groupsHeader: X-Forwarded-Groups
-  groupsDelimiter: ","
-  # Reject requests with no identity (recommended).
-  required: true
+mattermost:
+  url: https://mattermost.snapp.cab
+  tokenEnv: MATTERMOST_TOKEN
+  # Optional: map a Mattermost email to a different OpenShift username.
+  # Default (empty) uses the Mattermost email verbatim as the SSO identity.
+  identityMap: {}
+    # alice@snapp.cab: alice.smith@snapp.cab
+
+dify:
+  url: https://dify.snappcloud.io/v1
+  apiKeyEnv: DIFY_API_KEY
 
 authorizer:
   # kube  -> OpenShift RBAC via SubjectAccessReview (recommended).
-  # static-> in-config user/group -> namespace map (no cluster RBAC).
+  # static-> in-config user/group -> namespace map.
   # allow -> allow everything (local dev only).
   provider: kube
-  # Cache decisions briefly to collapse repeated SARs within a single
-  # multi-namespace tool call. Empty disables.
+  # Cache decisions briefly. Empty disables.
   cacheTTL: 30s
-  # Default RBAC action checked per namespace. "can the user GET pods here?"
-  # is a good proxy for "can the user see this namespace's workloads".
+  # "Can the user GET pods in namespace N?" is the proxy for "can the user see
+  # this namespace's workloads". The bot lists every namespace passing this.
   action:
     verb: get
     group: ""
     resource: pods
   kube:
-    # Empty = in-cluster config.
-    kubeconfig: ""
-    # Restrict /v1/namespaces enumeration (optional label selector).
-    namespaceSelector: ""
+    kubeconfig: "" # empty = in-cluster
+    namespaceSelector: "" # optional label selector to exclude system namespaces
     listConcurrency: 16
-  # Used only when provider: static.
   static:
     users:
       saman.hoseini@snapp.cab:
@@ -47,34 +44,3 @@ authorizer:
     groups:
       platform-admins:
         - "*"
-
-mcps:
-  cilium-hubble-mcp:
-    upstream: http://cilium-hubble-mcp-svc:8080
-    tools:
-      # Default rule for every hubble tool: namespaces come from the namespace
-      # arg and from the namespace prefix of pod/service selectors.
-      "*":
-        requireNamespace: true
-        namespaceArgs:
-          - {key: namespace, format: plain}
-          - {key: pod, format: slash}
-          - {key: source_pod, format: slash}
-          - {key: destination_pod, format: slash}
-          - {key: service, format: slash}
-          - {key: source_service, format: slash}
-          - {key: destination_service, format: slash}
-      # Cluster-health tools expose no tenant data — make them public.
-      server_status: {public: true}
-      get_nodes: {public: true}
-      get_namespaces: {public: true}
-
-  contour-envoy-mcp:
-    upstream: http://contour-envoy-mcp-svc:8080
-    tools:
-      "*":
-        # Envoy/Contour tools are largely cluster-scoped ingress state; deny by
-        # default unless a tool is explicitly made public or namespace-scoped.
-        requireNamespace: true
-        namespaceArgs:
-          - {key: namespace, format: plain}

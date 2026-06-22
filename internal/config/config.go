@@ -1,8 +1,11 @@
-// Package config loads and validates the mcp-authz configuration. The config
-// is the single place that encodes how to extract identity, which backend to
-// authorize against, and — per MCP server — how to discover which namespaces a
-// tool call touches. Adding a new MCP server is a config change, not a code
-// change, which is what keeps the enforcement engine reusable.
+// Package config loads and validates the mcp-authz configuration.
+//
+// mcp-authz is the backend for the SnappCloud Mattermost bot. It authenticates
+// the chatting user (real SSO identity), decides whether that user is authorized
+// for their query, and — only if so — forwards the query to the Dify workflow.
+// The config therefore has three concerns: the Mattermost connection, the
+// authorization backend, and the Dify workflow endpoint. It knows nothing about
+// MCP servers — authorization is a pure "may this user see namespace N?" check.
 package config
 
 import (
@@ -17,37 +20,38 @@ import (
 
 // Config is the root configuration document.
 type Config struct {
-	// Identity controls how the caller's identity is extracted from requests.
-	Identity Identity `yaml:"identity"`
-	// Authorizer selects and configures the decision backend.
+	Mattermost Mattermost `yaml:"mattermost"`
+	Dify       Dify       `yaml:"dify"`
 	Authorizer Authorizer `yaml:"authorizer"`
-	// MCPs registers the upstream MCP servers to protect, keyed by name.
-	MCPs map[string]MCP `yaml:"mcps"`
 }
 
-// Identity describes where to read the authenticated user and groups from.
-// In SnappCloud an upstream auth proxy injects these headers; mcp-authz trusts
-// them and must therefore only be reachable through that proxy.
-type Identity struct {
-	// UserHeaders are tried in order; first non-empty wins.
-	UserHeaders []string `yaml:"userHeaders"`
-	// GroupsHeader carries a delimited list of groups (optional).
-	GroupsHeader string `yaml:"groupsHeader"`
-	// GroupsDelimiter splits GroupsHeader (default ",").
-	GroupsDelimiter string `yaml:"groupsDelimiter"`
-	// Required rejects requests without an identity (default true). When false
-	// an anonymous request yields an empty subject and is denied by the
-	// backend, which is still fail-closed but returns a 403 not a 401.
-	Required *bool `yaml:"required"`
+// Mattermost configures the bot's connection to the Mattermost server.
+type Mattermost struct {
+	// URL is the Mattermost base URL, e.g. https://mattermost.snapp.cab.
+	URL string `yaml:"url"`
+	// TokenEnv names the env var holding the bot access token (never in YAML).
+	TokenEnv string `yaml:"tokenEnv"`
+	// IdentityMap optionally maps a Mattermost email to a different OpenShift
+	// username. Empty = use the Mattermost email verbatim as the SSO identity.
+	IdentityMap map[string]string `yaml:"identityMap"`
 }
 
-// Authorizer selects the decision backend and its options.
+// Dify configures the workflow the bot forwards authorized queries to.
+type Dify struct {
+	// URL is the Dify API base, e.g. https://dify.snappcloud.io/v1.
+	URL string `yaml:"url"`
+	// APIKeyEnv names the env var holding the Dify app API key.
+	APIKeyEnv string `yaml:"apiKeyEnv"`
+}
+
+// Authorizer selects the decision backend and its options. Reused unchanged from
+// the original gateway: the only question asked is "may user X get pods in ns N?"
 type Authorizer struct {
 	// Provider is one of: kube, static, allow.
 	Provider string `yaml:"provider"`
 	// CacheTTL caches decisions for this duration (e.g. "30s"). Empty disables.
 	CacheTTL string `yaml:"cacheTTL"`
-	// Action is the default RBAC action checked per namespace.
+	// Action is the RBAC action checked per namespace.
 	Action authz.Action `yaml:"action"`
 
 	Kube   KubeConfig         `yaml:"kube"`
@@ -60,50 +64,6 @@ type KubeConfig struct {
 	NamespaceSelector string `yaml:"namespaceSelector"`
 	ListConcurrency   int    `yaml:"listConcurrency"`
 }
-
-// MCP describes one protected upstream MCP server.
-type MCP struct {
-	// Upstream is the base URL of the real MCP server (e.g.
-	// http://cilium-hubble-mcp-svc:8080).
-	Upstream string `yaml:"upstream"`
-	// Action overrides the global Action for this MCP (optional). This lets a
-	// read-only flow MCP check "get pods" while another checks something else.
-	Action *authz.Action `yaml:"action"`
-	// Tools maps tool name -> extraction rules. The key "*" is the default
-	// applied to any tool without an explicit entry.
-	Tools map[string]Tool `yaml:"tools"`
-}
-
-// Tool declares how to find the namespaces referenced by a single MCP tool
-// call and whether an unscoped call is permitted.
-type Tool struct {
-	// NamespaceArgs lists the tool arguments that carry a namespace.
-	NamespaceArgs []NamespaceArg `yaml:"namespaceArgs"`
-	// RequireNamespace denies the call when no namespace could be extracted
-	// (i.e. cluster-wide queries). Default true: unscoped == deny.
-	RequireNamespace *bool `yaml:"requireNamespace"`
-	// Public skips authorization entirely for this tool (e.g. server_status,
-	// get_namespaces). Use sparingly.
-	Public bool `yaml:"public"`
-}
-
-// NamespaceArg points at one tool argument and says how to read a namespace
-// out of its value.
-type NamespaceArg struct {
-	// Key is the argument name in the tool call (e.g. "namespace", "source_pod").
-	Key string `yaml:"key"`
-	// Format is how to parse the value:
-	//   "plain" — the value is the namespace itself.
-	//   "slash" — the value is "namespace/name"; take the part before "/".
-	//             If there is no "/", the namespace is unknown (treated as
-	//             cluster-wide for that arg).
-	Format string `yaml:"format"`
-}
-
-const (
-	FormatPlain = "plain"
-	FormatSlash = "slash"
-)
 
 // Load reads, parses, defaults, and validates a config file.
 func Load(path string) (*Config, error) {
@@ -123,54 +83,34 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
-	if len(c.Identity.UserHeaders) == 0 {
-		// SnappCloud auth-proxy defaults; override per cluster as needed.
-		c.Identity.UserHeaders = []string{"X-Forwarded-Email", "X-Forwarded-User", "X-Auth-Request-Email", "X-Remote-User"}
+	if c.Mattermost.TokenEnv == "" {
+		c.Mattermost.TokenEnv = "MATTERMOST_TOKEN"
 	}
-	if c.Identity.GroupsHeader == "" {
-		c.Identity.GroupsHeader = "X-Forwarded-Groups"
-	}
-	if c.Identity.GroupsDelimiter == "" {
-		c.Identity.GroupsDelimiter = ","
-	}
-	if c.Identity.Required == nil {
-		c.Identity.Required = boolPtr(true)
+	if c.Dify.APIKeyEnv == "" {
+		c.Dify.APIKeyEnv = "DIFY_API_KEY"
 	}
 	if c.Authorizer.Provider == "" {
 		c.Authorizer.Provider = "kube"
 	}
+	if c.Authorizer.Action.Verb == "" {
+		c.Authorizer.Action.Verb = "get"
+	}
+	if c.Authorizer.Action.Resource == "" {
+		c.Authorizer.Action.Resource = "pods"
+	}
 }
 
 func (c *Config) validate() error {
+	if strings.TrimSpace(c.Mattermost.URL) == "" {
+		return fmt.Errorf("mattermost.url is required")
+	}
+	if strings.TrimSpace(c.Dify.URL) == "" {
+		return fmt.Errorf("dify.url is required")
+	}
 	switch c.Authorizer.Provider {
 	case "kube", "static", "allow":
 	default:
 		return fmt.Errorf("authorizer.provider %q invalid (want kube|static|allow)", c.Authorizer.Provider)
 	}
-	if len(c.MCPs) == 0 {
-		return fmt.Errorf("at least one mcp must be configured under mcps")
-	}
-	for name, m := range c.MCPs {
-		if strings.TrimSpace(m.Upstream) == "" {
-			return fmt.Errorf("mcp %q: upstream is required", name)
-		}
-		for tname, t := range m.Tools {
-			for _, na := range t.NamespaceArgs {
-				if na.Key == "" {
-					return fmt.Errorf("mcp %q tool %q: namespaceArg.key is empty", name, tname)
-				}
-				switch na.Format {
-				case FormatPlain, FormatSlash, "":
-				default:
-					return fmt.Errorf("mcp %q tool %q key %q: format %q invalid (want plain|slash)", name, tname, na.Key, na.Format)
-				}
-			}
-		}
-	}
 	return nil
 }
-
-// RequireIdentity reports whether anonymous requests must be rejected.
-func (c *Config) RequireIdentity() bool { return c.Identity.Required != nil && *c.Identity.Required }
-
-func boolPtr(b bool) *bool { return &b }

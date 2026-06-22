@@ -35,4 +35,4 @@ USER nonroot:nonroot
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/mcp-authz"]
-CMD ["-config=/etc/mcp-authz/config.yaml", "-addr=:8080", "-mode=both"]
+CMD ["-config=/etc/mcp-authz/config.yaml", "-addr=:8080"]
