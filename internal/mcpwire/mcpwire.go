@@ -1,7 +1,7 @@
-// Package mcpwire understands just enough of the MCP JSON-RPC wire format to
-// decide whether a request is a namespace-scoped tools/call and, if so, which
-// namespaces it touches. Anything it does not recognise is reported as "not a
-// tools/call" and passed through unchecked by the gateway.
+// Package mcpwire understands just enough of the MCP JSON-RPC wire format for
+// the gateway: classify a request (tools/call vs tools/list vs other), read the
+// scope token and namespaces from a tools/call, and inject the token parameter
+// into a tools/list response schema.
 package mcpwire
 
 import (
@@ -9,34 +9,78 @@ import (
 	"strings"
 )
 
-const methodToolsCall = "tools/call"
+const (
+	MethodToolsCall = "tools/call"
+	MethodToolsList = "tools/list"
+	// ScopeArg is the synthetic tool argument that carries the scope token. The
+	// gateway injects it into every tool schema and strips it before forwarding.
+	ScopeArg = "_scope_token"
+)
 
-// Request is a partial view of an MCP JSON-RPC request.
-type Request struct {
-	ID     json.RawMessage `json:"id"`
-	Method string          `json:"method"`
-	Params struct {
-		Name      string         `json:"name"`
-		Arguments map[string]any `json:"arguments"`
-	} `json:"params"`
+// Call is a parsed tools/call with mutable arguments.
+type Call struct {
+	full map[string]any
+	name string
+	args map[string]any
 }
 
-// Parse decodes a body. ok is false (nil error) when it is not a single
-// tools/call object (initialize, tools/list, notifications, batch) — the gateway
-// forwards those unchecked.
-func Parse(body []byte) (*Request, bool, error) {
-	t := strings.TrimSpace(string(body))
-	if t == "" || t[0] != '{' {
-		return nil, false, nil
+// ParseCall returns the parsed tools/call, or ok=false when body is not a single
+// tools/call object (initialize, notifications, batch, tools/list, …).
+func ParseCall(body []byte) (*Call, bool) {
+	var full map[string]any
+	if t := strings.TrimSpace(string(body)); t == "" || t[0] != '{' {
+		return nil, false
 	}
-	var r Request
-	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, false, err
+	if json.Unmarshal(body, &full) != nil {
+		return nil, false
 	}
-	if r.Method != methodToolsCall || r.Params.Name == "" {
-		return nil, false, nil
+	if m, _ := full["method"].(string); m != MethodToolsCall {
+		return nil, false
 	}
-	return &r, true, nil
+	params, _ := full["params"].(map[string]any)
+	name, _ := params["name"].(string)
+	if name == "" {
+		return nil, false
+	}
+	args, _ := params["arguments"].(map[string]any)
+	if args == nil {
+		args = map[string]any{}
+	}
+	return &Call{full: full, name: name, args: args}, true
+}
+
+// Name is the tool name.
+func (c *Call) Name() string { return c.name }
+
+// Args are the (mutable) tool arguments.
+func (c *Call) Args() map[string]any { return c.args }
+
+// ScopeToken returns the scope token from the arguments and removes it, so the
+// upstream MCP server never sees the synthetic argument.
+func (c *Call) ScopeToken() string {
+	tok, _ := c.args[ScopeArg].(string)
+	delete(c.args, ScopeArg)
+	return tok
+}
+
+// Body re-serializes the call (with _scope_token stripped) for forwarding.
+func (c *Call) Body() ([]byte, error) {
+	if params, ok := c.full["params"].(map[string]any); ok {
+		params["arguments"] = c.args
+	}
+	return json.Marshal(c.full)
+}
+
+// Method returns the JSON-RPC method of a body, or "" if not a single object.
+func Method(body []byte) string {
+	var m struct {
+		Method string `json:"method"`
+	}
+	if t := strings.TrimSpace(string(body)); t == "" || t[0] != '{' {
+		return ""
+	}
+	_ = json.Unmarshal(body, &m)
+	return m.Method
 }
 
 // NamespaceArg points at one tool argument and how to read a namespace from it.
@@ -71,11 +115,7 @@ func ExtractNamespaces(args map[string]any, rule Tool) Extraction {
 		out = append(out, ns)
 	}
 	for _, na := range rule.NamespaceArgs {
-		raw, ok := args[na.Key]
-		if !ok {
-			continue
-		}
-		val, ok := raw.(string)
+		val, ok := args[na.Key].(string)
 		if !ok || val == "" {
 			continue
 		}
@@ -85,7 +125,7 @@ func ExtractNamespaces(args map[string]any, rule Tool) Extraction {
 			}
 			continue
 		}
-		add(val) // plain
+		add(val)
 	}
 	return Extraction{Namespaces: out, Unscoped: len(out) == 0}
 }
@@ -93,4 +133,43 @@ func ExtractNamespaces(args map[string]any, rule Tool) Extraction {
 // RequireNamespace reports the effective requireNamespace (default true).
 func RequireNamespace(rule Tool) bool {
 	return rule.RequireNamespace == nil || *rule.RequireNamespace
+}
+
+// InjectScopeParam adds the _scope_token parameter to every tool schema in a
+// tools/list JSON-RPC response object, so the agent provides it on each call.
+// It mutates and returns the object; non-tools/list objects are returned as-is.
+func InjectScopeParam(obj map[string]any) map[string]any {
+	result, _ := obj["result"].(map[string]any)
+	tools, _ := result["tools"].([]any)
+	for _, ti := range tools {
+		tool, ok := ti.(map[string]any)
+		if !ok {
+			continue
+		}
+		schema, _ := tool["inputSchema"].(map[string]any)
+		if schema == nil {
+			schema = map[string]any{"type": "object"}
+			tool["inputSchema"] = schema
+		}
+		props, _ := schema["properties"].(map[string]any)
+		if props == nil {
+			props = map[string]any{}
+			schema["properties"] = props
+		}
+		props[ScopeArg] = map[string]any{
+			"type":        "string",
+			"description": "REQUIRED authorization token. Set it to the exact value of the scope_token workflow input.",
+		}
+		req, _ := schema["required"].([]any)
+		has := false
+		for _, r := range req {
+			if s, _ := r.(string); s == ScopeArg {
+				has = true
+			}
+		}
+		if !has {
+			schema["required"] = append(req, ScopeArg)
+		}
+	}
+	return obj
 }

@@ -43,28 +43,37 @@ func token(t *testing.T, scope scopetoken.Scope) string {
 	return tok
 }
 
-func call(name string, args map[string]any) string {
+// call builds a tools/call with the scope token in the arguments (the B design).
+func call(name string, args map[string]any, tok string) string {
+	if args == nil {
+		args = map[string]any{}
+	}
+	if tok != "" {
+		args["_scope_token"] = tok
+	}
 	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
 		"params": map[string]any{"name": name, "arguments": args}})
 	return string(b)
 }
 
-// do sends a tools/call and returns (forwardedToUpstream, jsonRPCError).
-func do(t *testing.T, h *Handler, body, tok string) (bool, string) {
+// stubUpstream echoes whether _scope_token reached it (it must NOT) and marks forwarding.
+func stubUpstream(t *testing.T, sawScopeArg *bool) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "_scope_token") {
+			*sawScopeArg = true
+		}
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":"UPSTREAM_OK"}`)
+	}))
+}
+
+func do(t *testing.T, h *Handler, body string) (bool, string) {
 	t.Helper()
-	forwarded := false
-	// upstream marker handler is set per test via the proxy target; here we detect
-	// forwarding by the response body from a stub upstream.
 	r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
-	if tok != "" {
-		r.Header.Set("X-Scope-Token", tok)
-	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	resp := w.Body.String()
-	if strings.Contains(resp, "UPSTREAM_OK") {
-		forwarded = true
-	}
+	forwarded := strings.Contains(resp, "UPSTREAM_OK")
 	var env struct {
 		Error struct {
 			Message string `json:"message"`
@@ -74,56 +83,56 @@ func do(t *testing.T, h *Handler, body, tok string) (bool, string) {
 	return forwarded, env.Error.Message
 }
 
-func stubUpstream() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":"UPSTREAM_OK"}`)
-	}))
-}
-
-func TestAuthorizedNamespaceForwarded(t *testing.T) {
-	up := stubUpstream()
+func TestAuthorizedNamespaceForwardedAndArgStripped(t *testing.T) {
+	saw := false
+	up := stubUpstream(t, &saw)
 	defer up.Close()
 	h := newGW(t, up.URL)
-	fwd, errMsg := do(t, h, call("get_flows", map[string]any{"namespace": "argocd"}),
-		token(t, scopetoken.Scope{"okd4-ts-2": {"argocd", "team-a"}}))
+	fwd, errMsg := do(t, h, call("get_flows", map[string]any{"namespace": "argocd"},
+		token(t, scopetoken.Scope{"okd4-ts-2": {"argocd"}})))
 	if !fwd {
-		t.Fatalf("authorized call was not forwarded; err=%q", errMsg)
+		t.Fatalf("authorized call not forwarded; err=%q", errMsg)
+	}
+	if saw {
+		t.Fatal("_scope_token leaked to the upstream MCP server")
 	}
 }
 
 func TestUnauthorizedNamespaceBlocked(t *testing.T) {
-	up := stubUpstream()
+	saw := false
+	up := stubUpstream(t, &saw)
 	defer up.Close()
 	h := newGW(t, up.URL)
-	fwd, errMsg := do(t, h, call("get_flows", map[string]any{"namespace": "kube-system"}),
-		token(t, scopetoken.Scope{"okd4-ts-2": {"argocd"}}))
+	fwd, errMsg := do(t, h, call("get_flows", map[string]any{"namespace": "kube-system"},
+		token(t, scopetoken.Scope{"okd4-ts-2": {"argocd"}})))
 	if fwd {
-		t.Fatal("unauthorized namespace was forwarded")
+		t.Fatal("unauthorized namespace forwarded")
 	}
 	if !strings.Contains(errMsg, "not authorized for namespace") {
-		t.Fatalf("expected deny message, got %q", errMsg)
+		t.Fatalf("expected deny, got %q", errMsg)
 	}
 }
 
 func TestWrongClusterScopeBlocked(t *testing.T) {
-	up := stubUpstream()
+	saw := false
+	up := stubUpstream(t, &saw)
 	defer up.Close()
-	h := newGW(t, up.URL) // cluster okd4-ts-2
-	// token authorizes argocd on ts-3, nothing on ts-2 -> blocked here.
-	fwd, _ := do(t, h, call("get_flows", map[string]any{"namespace": "argocd"}),
-		token(t, scopetoken.Scope{"okd4-ts-3": {"argocd"}}))
+	h := newGW(t, up.URL)
+	fwd, _ := do(t, h, call("get_flows", map[string]any{"namespace": "argocd"},
+		token(t, scopetoken.Scope{"okd4-ts-3": {"argocd"}})))
 	if fwd {
 		t.Fatal("ts-3 scope must not authorize a ts-2 call")
 	}
 }
 
 func TestMissingTokenBlocked(t *testing.T) {
-	up := stubUpstream()
+	saw := false
+	up := stubUpstream(t, &saw)
 	defer up.Close()
 	h := newGW(t, up.URL)
-	fwd, errMsg := do(t, h, call("get_flows", map[string]any{"namespace": "argocd"}), "")
+	fwd, errMsg := do(t, h, call("get_flows", map[string]any{"namespace": "argocd"}, ""))
 	if fwd {
-		t.Fatal("call with no token was forwarded")
+		t.Fatal("call with no token forwarded")
 	}
 	if !strings.Contains(errMsg, "scope token") {
 		t.Fatalf("expected token error, got %q", errMsg)
@@ -131,23 +140,30 @@ func TestMissingTokenBlocked(t *testing.T) {
 }
 
 func TestPublicToolForwardedWithoutToken(t *testing.T) {
-	up := stubUpstream()
+	saw := false
+	up := stubUpstream(t, &saw)
 	defer up.Close()
 	h := newGW(t, up.URL)
-	fwd, _ := do(t, h, call("server_status", nil), "")
+	fwd, _ := do(t, h, call("server_status", nil, ""))
 	if !fwd {
-		t.Fatal("public tool should be forwarded without a token")
+		t.Fatal("public tool should forward without a token")
 	}
 }
 
-func TestSlashNamespaceExtraction(t *testing.T) {
-	up := stubUpstream()
+func TestToolsListInjectsScopeParam(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_flows","inputSchema":{"type":"object","properties":{"namespace":{"type":"string"}},"required":["namespace"]}}]}}`)
+	}))
 	defer up.Close()
 	h := newGW(t, up.URL)
-	// pod = "kube-system/coredns" -> namespace kube-system, not authorized.
-	fwd, _ := do(t, h, call("get_flows", map[string]any{"pod": "kube-system/coredns"}),
-		token(t, scopetoken.Scope{"okd4-ts-2": {"argocd"}}))
-	if fwd {
-		t.Fatal("slash-form unauthorized namespace was forwarded")
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	out := w.Body.String()
+	if !strings.Contains(out, "_scope_token") {
+		t.Fatalf("tools/list response did not advertise _scope_token: %s", out)
 	}
 }
