@@ -164,6 +164,71 @@ func (k *Kube) ListAllowed(ctx context.Context, sub Subject, act Action) ([]stri
 	return allowed, nil
 }
 
+// ResolveNamespaces maps each resource ref to the namespace(s) it lives in,
+// using in-cluster reads. Fail-closed: an API error aborts the whole resolve.
+func (k *Kube) ResolveNamespaces(ctx context.Context, refs []ResourceRef) (map[string][]string, error) {
+	out := make(map[string][]string, len(refs))
+	for _, ref := range refs {
+		ns, err := k.resolveOne(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		if len(ns) > 0 {
+			out[ref.Value] = ns
+		}
+	}
+	return out, nil
+}
+
+func (k *Kube) resolveOne(ctx context.Context, ref ResourceRef) ([]string, error) {
+	switch ref.Kind {
+	case "namespace":
+		return []string{ref.Value}, nil
+	case "pod":
+		return k.podNamespaces(ctx, "metadata.name="+ref.Value)
+	case "ip":
+		return k.podNamespaces(ctx, "status.podIP="+ref.Value)
+	case "service":
+		svcs, err := k.client.CoreV1().Services(metav1.NamespaceAll).List(ctx,
+			metav1.ListOptions{FieldSelector: "metadata.name=" + ref.Value})
+		if err != nil {
+			return nil, fmt.Errorf("resolve service %q: %w", ref.Value, err)
+		}
+		ns := make([]string, 0, len(svcs.Items))
+		for _, s := range svcs.Items {
+			ns = append(ns, s.Namespace)
+		}
+		return uniqueNamespaces(ns), nil
+	default:
+		return nil, nil
+	}
+}
+
+func uniqueNamespaces(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, n := range in {
+		if n != "" && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func (k *Kube) podNamespaces(ctx context.Context, fieldSelector string) ([]string, error) {
+	pods, err := k.client.CoreV1().Pods(metav1.NamespaceAll).List(ctx,
+		metav1.ListOptions{FieldSelector: fieldSelector})
+	if err != nil {
+		return nil, fmt.Errorf("resolve %q: %w", fieldSelector, err)
+	}
+	ns := make([]string, 0, len(pods.Items))
+	for _, p := range pods.Items {
+		ns = append(ns, p.Namespace)
+	}
+	return uniqueNamespaces(ns), nil
+}
+
 func withDefaults(act Action) Action {
 	if act.Verb == "" {
 		act.Verb = "get"

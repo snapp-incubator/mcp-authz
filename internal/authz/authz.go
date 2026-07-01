@@ -68,6 +68,21 @@ type NamespaceLister interface {
 	ListAllowed(ctx context.Context, sub Subject, act Action) ([]string, error)
 }
 
+// ResourceRef names a cluster resource whose namespace the caller wants
+// resolved. Kind is pod | service | ip | namespace; Value is the name or IP.
+type ResourceRef struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+// NamespaceResolver maps resources to the namespace(s) they live in. MCP tool
+// output references pods/IPs/services, not namespaces, so the bot resolves those
+// here (in-cluster) before gating them against the user's scope. A resource may
+// resolve to several namespaces (same pod name in different namespaces).
+type NamespaceResolver interface {
+	ResolveNamespaces(ctx context.Context, refs []ResourceRef) (map[string][]string, error)
+}
+
 // AuthorizeAll evaluates every namespace and returns the per-namespace
 // decisions plus an overall verdict. The overall verdict is allow only if
 // every namespace is allowed (all-or-nothing): a query that reaches into a

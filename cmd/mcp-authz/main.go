@@ -71,9 +71,13 @@ func run(configPath, addr string, log *slog.Logger) error {
 		log.Warn("no auth token set; the API is unauthenticated (rely on NetworkPolicy)", "env", cfg.Server.AuthTokenEnv)
 	}
 
+	// Resolver is optional: only backends that can map resources -> namespaces
+	// (the kube backend) enable /v1/resolve.
+	resolver, _ := lister.(authz.NamespaceResolver)
+
 	mux := http.NewServeMux()
 	registerHealth(mux)
-	api.New(lister, cfg.Authorizer.Action, token, log).Routes(mux)
+	api.New(lister, resolver, cfg.Authorizer.Action, token, log).Routes(mux)
 
 	log.Info("starting mcp-authz authorization API",
 		"version", version.Version, "addr", addr, "provider", cfg.Authorizer.Provider, "authRequired", token != "")

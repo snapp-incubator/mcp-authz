@@ -22,7 +22,7 @@ func (f *fakeLister) ListAllowed(_ context.Context, _ authz.Subject, _ authz.Act
 }
 
 func newServer(l *fakeLister, token string) *httptest.Server {
-	h := New(l, authz.Action{}, token, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h := New(l, nil, authz.Action{}, token, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	mux := http.NewServeMux()
 	h.Routes(mux)
 	return httptest.NewServer(mux)

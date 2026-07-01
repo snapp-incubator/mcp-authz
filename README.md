@@ -42,8 +42,17 @@ POST /v1/authorize
   {"user":"<email>","namespaces":["team-a"]}
   -> {"allowed":true}        # all-or-nothing across the requested namespaces
 
+POST /v1/resolve             # map resources -> namespace(s) (kube backend only)
+  {"refs":[{"kind":"ip","value":"10.0.0.5"},{"kind":"pod","value":"web-0"}]}
+  -> {"namespaces":{"10.0.0.5":["team-a"],"web-0":["team-a","team-b"]}}
+
 GET  /healthz  /readyz
 ```
+
+`/v1/resolve` lets the bot gate MCP tool output that names only a pod/service/IP
+(not a namespace): it maps the resource to its namespace(s) in-cluster, and the
+bot checks those against the user's scope. Kinds: `pod`, `service`, `ip`,
+`namespace`.
 
 Identity arrives as a parameter from the trusted caller (the bot); the bearer
 token gates who may call. Groups are resolved server-side, so the `groups` param
@@ -76,7 +85,7 @@ NetworkPolicy restricting ingress to the Contour router, and a ClusterRole/Bindi
 granting:
 
 - `create` on `subjectaccessreviews` (authorization.k8s.io),
-- `get`/`list` on `namespaces` (core),
+- `get`/`list` on `namespaces`, `pods`, `services` (core) — the last two for `/v1/resolve`,
 - `get`/`list` on `groups` (user.openshift.io) — for group resolution.
 
 The `AUTH_TOKEN` must be the **same value** in every region and in the bot's

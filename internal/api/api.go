@@ -15,21 +15,25 @@ import (
 
 // Handler serves the authorization API.
 type Handler struct {
-	lister authz.NamespaceLister
-	action authz.Action
-	token  string // bearer token the caller must present ("" disables auth)
-	log    *slog.Logger
+	lister   authz.NamespaceLister
+	resolver authz.NamespaceResolver // optional (nil disables /v1/resolve)
+	action   authz.Action
+	token    string // bearer token the caller must present ("" disables auth)
+	log      *slog.Logger
 }
 
-// New builds the API handler.
-func New(lister authz.NamespaceLister, action authz.Action, token string, log *slog.Logger) *Handler {
-	return &Handler{lister: lister, action: action, token: token, log: log}
+// New builds the API handler. resolver may be nil (no /v1/resolve).
+func New(lister authz.NamespaceLister, resolver authz.NamespaceResolver, action authz.Action, token string, log *slog.Logger) *Handler {
+	return &Handler{lister: lister, resolver: resolver, action: action, token: token, log: log}
 }
 
 // Routes registers the endpoints on a mux.
 func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/namespaces", h.auth(h.namespaces))
 	mux.HandleFunc("POST /v1/authorize", h.auth(h.authorize))
+	if h.resolver != nil {
+		mux.HandleFunc("POST /v1/resolve", h.auth(h.resolve))
+	}
 }
 
 // auth wraps a handler with bearer-token verification.
@@ -111,6 +115,36 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, authorizeResponse{Allowed: true})
+}
+
+type resolveRequest struct {
+	Refs []authz.ResourceRef `json:"refs"`
+}
+
+type resolveResponse struct {
+	// Namespaces maps each ref value to the namespace(s) it resolves to.
+	Namespaces map[string][]string `json:"namespaces"`
+}
+
+// resolve maps resource refs (pod/service/ip/namespace) to their namespaces.
+// The caller (bot) gates the returned namespaces against the user's scope.
+func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) {
+	var req resolveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if len(req.Refs) == 0 {
+		writeJSON(w, http.StatusOK, resolveResponse{Namespaces: map[string][]string{}})
+		return
+	}
+	nss, err := h.resolver.ResolveNamespaces(r.Context(), req.Refs)
+	if err != nil {
+		h.log.Error("resolve", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resolve backend unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, resolveResponse{Namespaces: nss})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
