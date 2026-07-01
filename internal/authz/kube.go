@@ -44,7 +44,7 @@ type KubeOptions struct {
 	ListConcurrency int
 	// QPS/Burst raise the client-go rate limit. ListAllowed issues one SAR per
 	// namespace; the default QPS 5 / Burst 10 throttles a multi-hundred-namespace
-	// sweep ("Waited ... due to client-side throttling"). Defaults: 50 / 100.
+	// sweep ("Waited ... due to client-side throttling"). Defaults: 100 / 200.
 	QPS   float32
 	Burst int
 }
@@ -57,11 +57,11 @@ func NewKube(opts KubeOptions) (*Kube, error) {
 	}
 	cfg.QPS = opts.QPS
 	if cfg.QPS <= 0 {
-		cfg.QPS = 50
+		cfg.QPS = 100
 	}
 	cfg.Burst = opts.Burst
 	if cfg.Burst <= 0 {
-		cfg.Burst = 100
+		cfg.Burst = 200
 	}
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {

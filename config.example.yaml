@@ -23,8 +23,8 @@ authorizer:
   listConcurrency: 16
   # client-go rate limit (defaults 50/100) — avoids client-side throttling on a
   # many-namespace SAR sweep.
-  qps: 50
-  burst: 100
+  qps: 100
+  burst: 200
   # Used only when provider: static.
   static:
     users:
