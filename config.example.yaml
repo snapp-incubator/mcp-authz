@@ -1,41 +1,31 @@
-# mcp-authz — SnappCloud Mattermost bot backend.
+# mcp-authz — authorization API for the SnappCloud bot.
 #
-# The bot listens on the Mattermost WebSocket, authenticates the chatting user
-# (real SSO identity), checks whether they are authorized for their query
-# (OpenShift RBAC), and only then forwards it to the Dify workflow.
-#
-# Secrets (the Mattermost bot token and the Dify API key) are NOT stored here —
-# they are read from the environment variables named below.
+# One instance runs per cluster. It answers, for THIS cluster via in-cluster
+# RBAC, which namespaces a user may access. The bot calls every region's instance
+# and aggregates. No kubeconfigs, no knowledge of other clusters/Mattermost/Dify.
 
-mattermost:
-  url: https://mattermost.snapp.cab
-  tokenEnv: MATTERMOST_TOKEN
-  # Optional: map a Mattermost email to a different OpenShift username.
-  # Default (empty) uses the Mattermost email verbatim as the SSO identity.
-  identityMap: {}
-    # alice@snapp.cab: alice.smith@snapp.cab
-
-dify:
-  url: https://dify.snappcloud.io/v1
-  apiKeyEnv: DIFY_API_KEY
+server:
+  # Env var holding the bearer token the bot must present. Empty disables auth
+  # (then rely on NetworkPolicy). The token is shared with the bot.
+  authTokenEnv: AUTH_TOKEN
 
 authorizer:
-  # kube  -> OpenShift RBAC via SubjectAccessReview (recommended).
-  # static-> in-config user/group -> namespace map.
-  # allow -> allow everything (local dev only).
+  # kube  -> in-cluster OpenShift RBAC via SubjectAccessReview (recommended).
+  # static-> in-config user/group -> namespace map (dev).
   provider: kube
-  # Cache decisions briefly. Empty disables.
-  cacheTTL: 30s
   # "Can the user GET pods in namespace N?" is the proxy for "can the user see
-  # this namespace's workloads". The bot lists every namespace passing this.
+  # this namespace's workloads".
   action:
     verb: get
     group: ""
     resource: pods
-  kube:
-    kubeconfig: "" # empty = in-cluster
-    namespaceSelector: "" # optional label selector to exclude system namespaces
-    listConcurrency: 16
+  namespaceSelector: "" # optional label selector to exclude system namespaces
+  listConcurrency: 16
+  # client-go rate limit (defaults 50/100) — avoids client-side throttling on a
+  # many-namespace SAR sweep.
+  qps: 50
+  burst: 100
+  # Used only when provider: static.
   static:
     users:
       saman.hoseini@snapp.cab:

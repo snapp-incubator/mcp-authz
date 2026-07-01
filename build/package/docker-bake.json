@@ -1,36 +1,18 @@
 {
-  "group": {
-    "default": {
-      "targets": ["mcp-authz"]
-    }
-  },
-  "variable": {
-    "TAG": {
-      "default": "latest"
-    },
-    "SHA": {
-      "default": "dev"
-    }
-  },
+  "group": { "default": { "targets": ["mcp-authz"] } },
+  "variable": { "TAG": { "default": "latest" }, "SHA": { "default": "dev" } },
   "target": {
     "mcp-authz": {
       "dockerfile": "Dockerfile",
       "context": ".",
       "platforms": ["linux/amd64", "linux/arm64"],
-      "args": {
-        "VERSION": "${TAG}",
-        "COMMIT": "${SHA}"
-      },
+      "args": { "VERSION": "${TAG}", "COMMIT": "${SHA}" },
       "tags": [
         "ghcr.io/snapp-incubator/mcp-authz:${TAG}",
         "ghcr.io/snapp-incubator/mcp-authz:sha-${SHA}"
       ],
-      "cache-from": [
-        "type=gha,scope=mcp-authz"
-      ],
-      "cache-to": [
-        "type=gha,mode=max,scope=mcp-authz"
-      ]
+      "cache-from": ["type=gha,scope=mcp-authz"],
+      "cache-to": ["type=gha,mode=max,scope=mcp-authz"]
     }
   }
 }

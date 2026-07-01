@@ -24,15 +24,15 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -X github.com/snapp-incubator/mcp-authz/internal/version.Version=${VERSION} \
     -X github.com/snapp-incubator/mcp-authz/internal/version.Commit=${COMMIT} \
     -X github.com/snapp-incubator/mcp-authz/internal/version.Date=${DATE}" \
-    -o /out/mcp-authz ./cmd/mcp-authz
+    -o /out/app ./cmd/mcp-authz
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
-COPY --from=builder /out/mcp-authz /usr/local/bin/mcp-authz
+COPY --from=builder /out/app /usr/local/bin/app
 
 USER nonroot:nonroot
 
 EXPOSE 8080
 
-ENTRYPOINT ["/usr/local/bin/mcp-authz"]
-CMD ["-config=/etc/mcp-authz/config.yaml", "-addr=:8080"]
+ENTRYPOINT ["/usr/local/bin/app"]
+CMD ["-addr=:8080"]

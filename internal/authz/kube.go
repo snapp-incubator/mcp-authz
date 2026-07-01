@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	authzv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +30,8 @@ type Kube struct {
 	nsSelector string
 	// listConcurrency caps parallel SARs during ListAllowed.
 	listConcurrency int
+	// groups resolves a user's OpenShift group memberships for the SAR.
+	groups *groupCache
 }
 
 // KubeOptions configures the Kube backend.
@@ -39,6 +42,11 @@ type KubeOptions struct {
 	NamespaceSelector string
 	// ListConcurrency bounds parallel checks in ListAllowed (default 16).
 	ListConcurrency int
+	// QPS/Burst raise the client-go rate limit. ListAllowed issues one SAR per
+	// namespace; the default QPS 5 / Burst 10 throttles a multi-hundred-namespace
+	// sweep ("Waited ... due to client-side throttling"). Defaults: 50 / 100.
+	QPS   float32
+	Burst int
 }
 
 // NewKube builds a Kube authorizer, using in-cluster config by default.
@@ -46,6 +54,14 @@ func NewKube(opts KubeOptions) (*Kube, error) {
 	cfg, err := loadRESTConfig(opts.Kubeconfig)
 	if err != nil {
 		return nil, fmt.Errorf("load kube config: %w", err)
+	}
+	cfg.QPS = opts.QPS
+	if cfg.QPS <= 0 {
+		cfg.QPS = 50
+	}
+	cfg.Burst = opts.Burst
+	if cfg.Burst <= 0 {
+		cfg.Burst = 100
 	}
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
@@ -55,7 +71,11 @@ func NewKube(opts KubeOptions) (*Kube, error) {
 	if conc <= 0 {
 		conc = 16
 	}
-	return &Kube{client: cs, nsSelector: opts.NamespaceSelector, listConcurrency: conc}, nil
+	// Resolve OpenShift groups via the raw API path (no openshift client dep).
+	gc := newGroupCache(func(ctx context.Context) ([]byte, error) {
+		return cs.CoreV1().RESTClient().Get().AbsPath("/apis/user.openshift.io/v1/groups").DoRaw(ctx)
+	}, 5*time.Minute)
+	return &Kube{client: cs, nsSelector: opts.NamespaceSelector, listConcurrency: conc, groups: gc}, nil
 }
 
 func loadRESTConfig(kubeconfig string) (*rest.Config, error) {
@@ -69,10 +89,14 @@ func (k *Kube) Name() string { return "kube" }
 
 func (k *Kube) Authorize(ctx context.Context, sub Subject, act Action, ns string) (Decision, error) {
 	act = withDefaults(act)
+	var resolved []string
+	if k.groups != nil {
+		resolved = k.groups.groupsFor(ctx, sub.User)
+	}
 	sar := &authzv1.SubjectAccessReview{
 		Spec: authzv1.SubjectAccessReviewSpec{
 			User:   sub.User,
-			Groups: sub.Groups,
+			Groups: subjectGroups(sub.Groups, resolved),
 			ResourceAttributes: &authzv1.ResourceAttributes{
 				Namespace: ns,
 				Verb:      act.Verb,

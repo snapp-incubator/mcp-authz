@@ -1,17 +1,15 @@
 // Package config loads and validates the mcp-authz configuration.
 //
-// mcp-authz is the backend for the SnappCloud Mattermost bot. It authenticates
-// the chatting user (real SSO identity), decides whether that user is authorized
-// for their query, and — only if so — forwards the query to the Dify workflow.
-// The config therefore has three concerns: the Mattermost connection, the
-// authorization backend, and the Dify workflow endpoint. It knows nothing about
-// MCP servers — authorization is a pure "may this user see namespace N?" check.
+// mcp-authz is the authorization API for the SnappCloud bot. One instance runs
+// per cluster and answers, for its OWN cluster (via in-cluster RBAC), "which
+// namespaces may this user access?". The bot calls every region's instance and
+// aggregates the answers — so mcp-authz needs no kubeconfigs and no knowledge of
+// other clusters, Mattermost, Dify, or MCP servers.
 package config
 
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -20,49 +18,34 @@ import (
 
 // Config is the root configuration document.
 type Config struct {
-	Mattermost Mattermost `yaml:"mattermost"`
-	Dify       Dify       `yaml:"dify"`
+	Server     Server     `yaml:"server"`
 	Authorizer Authorizer `yaml:"authorizer"`
 }
 
-// Mattermost configures the bot's connection to the Mattermost server.
-type Mattermost struct {
-	// URL is the Mattermost base URL, e.g. https://mattermost.snapp.cab.
-	URL string `yaml:"url"`
-	// TokenEnv names the env var holding the bot access token (never in YAML).
-	TokenEnv string `yaml:"tokenEnv"`
-	// IdentityMap optionally maps a Mattermost email to a different OpenShift
-	// username. Empty = use the Mattermost email verbatim as the SSO identity.
-	IdentityMap map[string]string `yaml:"identityMap"`
+// Server configures the HTTP API.
+type Server struct {
+	// AuthTokenEnv names the env var holding a bearer token the caller (the bot)
+	// must present. Empty disables auth (rely on network policy only).
+	AuthTokenEnv string `yaml:"authTokenEnv"`
 }
 
-// Dify configures the workflow the bot forwards authorized queries to.
-type Dify struct {
-	// URL is the Dify API base, e.g. https://dify.snappcloud.io/v1.
-	URL string `yaml:"url"`
-	// APIKeyEnv names the env var holding the Dify app API key.
-	APIKeyEnv string `yaml:"apiKeyEnv"`
-}
-
-// Authorizer selects the decision backend and its options. Reused unchanged from
-// the original gateway: the only question asked is "may user X get pods in ns N?"
+// Authorizer selects the decision backend and its options. The only question
+// asked is "may user X get pods in namespace N?" on this cluster.
 type Authorizer struct {
-	// Provider is one of: kube, static, allow.
+	// Provider is one of: kube, static.
 	Provider string `yaml:"provider"`
-	// CacheTTL caches decisions for this duration (e.g. "30s"). Empty disables.
-	CacheTTL string `yaml:"cacheTTL"`
 	// Action is the RBAC action checked per namespace.
 	Action authz.Action `yaml:"action"`
-
-	Kube   KubeConfig         `yaml:"kube"`
-	Static authz.StaticConfig `yaml:"static"`
-}
-
-// KubeConfig configures the SubjectAccessReview backend.
-type KubeConfig struct {
-	Kubeconfig        string `yaml:"kubeconfig"`
+	// NamespaceSelector optionally limits which namespaces are enumerated.
 	NamespaceSelector string `yaml:"namespaceSelector"`
-	ListConcurrency   int    `yaml:"listConcurrency"`
+	// ListConcurrency bounds parallel SARs during enumeration (default 16).
+	ListConcurrency int `yaml:"listConcurrency"`
+	// QPS/Burst raise the client-go rate limit so a many-namespace SAR sweep is
+	// not throttled. 0 = defaults (50 / 100).
+	QPS   float32 `yaml:"qps"`
+	Burst int     `yaml:"burst"`
+	// Static is used only when provider: static.
+	Static authz.StaticConfig `yaml:"static"`
 }
 
 // Load reads, parses, defaults, and validates a config file.
@@ -83,14 +66,14 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
-	if c.Mattermost.TokenEnv == "" {
-		c.Mattermost.TokenEnv = "MATTERMOST_TOKEN"
-	}
-	if c.Dify.APIKeyEnv == "" {
-		c.Dify.APIKeyEnv = "DIFY_API_KEY"
+	if c.Server.AuthTokenEnv == "" {
+		c.Server.AuthTokenEnv = "AUTH_TOKEN"
 	}
 	if c.Authorizer.Provider == "" {
 		c.Authorizer.Provider = "kube"
+	}
+	if c.Authorizer.ListConcurrency <= 0 {
+		c.Authorizer.ListConcurrency = 16
 	}
 	if c.Authorizer.Action.Verb == "" {
 		c.Authorizer.Action.Verb = "get"
@@ -101,16 +84,10 @@ func (c *Config) applyDefaults() {
 }
 
 func (c *Config) validate() error {
-	if strings.TrimSpace(c.Mattermost.URL) == "" {
-		return fmt.Errorf("mattermost.url is required")
-	}
-	if strings.TrimSpace(c.Dify.URL) == "" {
-		return fmt.Errorf("dify.url is required")
-	}
 	switch c.Authorizer.Provider {
-	case "kube", "static", "allow":
+	case "kube", "static":
 	default:
-		return fmt.Errorf("authorizer.provider %q invalid (want kube|static|allow)", c.Authorizer.Provider)
+		return fmt.Errorf("authorizer.provider %q invalid (want kube|static)", c.Authorizer.Provider)
 	}
 	return nil
 }
