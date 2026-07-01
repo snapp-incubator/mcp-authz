@@ -129,6 +129,19 @@ func (k *Kube) ListAllowed(ctx context.Context, sub Subject, act Action) ([]stri
 		return nil, fmt.Errorf("list namespaces: %w", err)
 	}
 
+	// Fast path: if the subject can perform the action CLUSTER-WIDE (a
+	// cluster-admin, or anyone with a cluster-scoped RoleBinding for it), grant
+	// every namespace and skip the per-namespace sweep. A SAR with an empty
+	// namespace checks cluster scope. This both fixes cluster-admins (who the
+	// per-namespace sweep can miss) and is far cheaper (one SAR, not hundreds).
+	if d, err := k.Authorize(ctx, sub, act, ""); err == nil && d.Allowed {
+		all := make([]string, 0, len(nsList.Items))
+		for _, ns := range nsList.Items {
+			all = append(all, ns.Name)
+		}
+		return all, nil
+	}
+
 	var (
 		mu       sync.Mutex
 		allowed  []string
