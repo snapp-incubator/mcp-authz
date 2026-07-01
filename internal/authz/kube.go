@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	authzv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +30,8 @@ type Kube struct {
 	nsSelector string
 	// listConcurrency caps parallel SARs during ListAllowed.
 	listConcurrency int
+	// groups resolves a user's OpenShift group memberships for the SAR.
+	groups *groupCache
 }
 
 // KubeOptions configures the Kube backend.
@@ -68,7 +71,11 @@ func NewKube(opts KubeOptions) (*Kube, error) {
 	if conc <= 0 {
 		conc = 16
 	}
-	return &Kube{client: cs, nsSelector: opts.NamespaceSelector, listConcurrency: conc}, nil
+	// Resolve OpenShift groups via the raw API path (no openshift client dep).
+	gc := newGroupCache(func(ctx context.Context) ([]byte, error) {
+		return cs.CoreV1().RESTClient().Get().AbsPath("/apis/user.openshift.io/v1/groups").DoRaw(ctx)
+	}, 5*time.Minute)
+	return &Kube{client: cs, nsSelector: opts.NamespaceSelector, listConcurrency: conc, groups: gc}, nil
 }
 
 func loadRESTConfig(kubeconfig string) (*rest.Config, error) {
@@ -82,10 +89,14 @@ func (k *Kube) Name() string { return "kube" }
 
 func (k *Kube) Authorize(ctx context.Context, sub Subject, act Action, ns string) (Decision, error) {
 	act = withDefaults(act)
+	var resolved []string
+	if k.groups != nil {
+		resolved = k.groups.groupsFor(ctx, sub.User)
+	}
 	sar := &authzv1.SubjectAccessReview{
 		Spec: authzv1.SubjectAccessReviewSpec{
 			User:   sub.User,
-			Groups: sub.Groups,
+			Groups: subjectGroups(sub.Groups, resolved),
 			ResourceAttributes: &authzv1.ResourceAttributes{
 				Namespace: ns,
 				Verb:      act.Verb,
