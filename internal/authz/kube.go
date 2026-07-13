@@ -177,6 +177,16 @@ func (k *Kube) ListAllowed(ctx context.Context, sub Subject, act Action) ([]stri
 	return allowed, nil
 }
 
+// IsClusterWide reports whether the subject may perform the action at cluster
+// scope (an empty-namespace SubjectAccessReview) — true for cluster-admins.
+func (k *Kube) IsClusterWide(ctx context.Context, sub Subject, act Action) (bool, error) {
+	d, err := k.Authorize(ctx, sub, withDefaults(act), "")
+	if err != nil {
+		return false, err
+	}
+	return d.Allowed, nil
+}
+
 // ResolveNamespaces maps each resource ref to the namespace(s) it lives in,
 // using in-cluster reads. Fail-closed: an API error aborts the whole resolve.
 func (k *Kube) ResolveNamespaces(ctx context.Context, refs []ResourceRef) (map[string][]string, error) {

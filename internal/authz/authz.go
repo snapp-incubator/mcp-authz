@@ -68,6 +68,13 @@ type NamespaceLister interface {
 	ListAllowed(ctx context.Context, sub Subject, act Action) ([]string, error)
 }
 
+// ClusterWideChecker is an optional capability: report whether the subject may
+// perform the action cluster-wide (e.g. a cluster-admin). Used to gate
+// cluster-infrastructure data (nodes, BGP state) to admins only.
+type ClusterWideChecker interface {
+	IsClusterWide(ctx context.Context, sub Subject, act Action) (bool, error)
+}
+
 // ResourceRef names a cluster resource whose namespace the caller wants
 // resolved. Kind is pod | service | ip | namespace; Value is the name or IP.
 type ResourceRef struct {

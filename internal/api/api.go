@@ -53,6 +53,9 @@ func (h *Handler) auth(next http.HandlerFunc) http.HandlerFunc {
 type namespacesResponse struct {
 	User       string   `json:"user"`
 	Namespaces []string `json:"namespaces"`
+	// ClusterWide is true when the user may perform the action at cluster scope
+	// (cluster-admin) — the caller may then expose cluster-infrastructure data.
+	ClusterWide bool `json:"clusterWide"`
 }
 
 // namespaces returns the namespaces the user may access on this cluster.
@@ -71,7 +74,12 @@ func (h *Handler) namespaces(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "authorization backend unavailable"})
 		return
 	}
-	writeJSON(w, http.StatusOK, namespacesResponse{User: user, Namespaces: nss})
+	clusterWide := false
+	if cw, ok := h.lister.(authz.ClusterWideChecker); ok {
+		// Fail-closed: an error just means "not admin".
+		clusterWide, _ = cw.IsClusterWide(r.Context(), sub, h.action)
+	}
+	writeJSON(w, http.StatusOK, namespacesResponse{User: user, Namespaces: nss, ClusterWide: clusterWide})
 }
 
 type authorizeRequest struct {
