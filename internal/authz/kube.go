@@ -187,17 +187,47 @@ func (k *Kube) IsClusterWide(ctx context.Context, sub Subject, act Action) (bool
 	return d.Allowed, nil
 }
 
+// maxResolveRefs bounds one resolve call; more refs than this cannot be
+// answered within a request timeout and the caller must narrow the query.
+const maxResolveRefs = 500
+
 // ResolveNamespaces maps each resource ref to the namespace(s) it lives in,
-// using in-cluster reads. Fail-closed: an API error aborts the whole resolve.
+// using in-cluster reads run in parallel (a flow capture can carry hundreds of
+// distinct IPs; resolving them sequentially blows the request timeout).
+// Fail-closed: any API error aborts the whole resolve.
 func (k *Kube) ResolveNamespaces(ctx context.Context, refs []ResourceRef) (map[string][]string, error) {
+	if len(refs) > maxResolveRefs {
+		return nil, fmt.Errorf("too many refs (%d > %d); narrow the query", len(refs), maxResolveRefs)
+	}
+
+	type result struct {
+		value string
+		ns    []string
+		err   error
+	}
+	results := make([]result, len(refs))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, k.listConcurrency)
+
+	for i, ref := range refs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int, r ResourceRef) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			ns, err := k.resolveOne(ctx, r)
+			results[idx] = result{value: r.Value, ns: ns, err: err}
+		}(i, ref)
+	}
+	wg.Wait()
+
 	out := make(map[string][]string, len(refs))
-	for _, ref := range refs {
-		ns, err := k.resolveOne(ctx, ref)
-		if err != nil {
-			return nil, err
+	for _, res := range results {
+		if res.err != nil {
+			return nil, res.err
 		}
-		if len(ns) > 0 {
-			out[ref.Value] = ns
+		if len(res.ns) > 0 {
+			out[res.value] = res.ns
 		}
 	}
 	return out, nil
