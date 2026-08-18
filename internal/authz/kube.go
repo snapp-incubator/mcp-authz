@@ -7,6 +7,7 @@ import (
 	"time"
 
 	authzv1 "k8s.io/api/authorization/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -63,6 +64,10 @@ func NewKube(opts KubeOptions) (*Kube, error) {
 	if cfg.Burst <= 0 {
 		cfg.Burst = 200
 	}
+	// Protobuf: built-in objects (pods for bulk IP resolution) encode far smaller
+	// and faster than JSON, cutting latency/memory on large pod scans.
+	cfg.AcceptContentTypes = "application/vnd.kubernetes.protobuf,application/json"
+	cfg.ContentType = "application/vnd.kubernetes.protobuf"
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("build kube client: %w", err)
@@ -187,19 +192,66 @@ func (k *Kube) IsClusterWide(ctx context.Context, sub Subject, act Action) (bool
 	return d.Allowed, nil
 }
 
-// maxResolveRefs bounds one resolve call; more refs than this cannot be
-// answered within a request timeout and the caller must narrow the query.
-const maxResolveRefs = 500
+// maxResolveRefs bounds one resolve call. High because IP resolution scales to
+// large batches via a single paged pod scan (bulkIPThreshold), not one API call
+// per ref — a busy flow capture can carry tens of thousands of distinct IPs.
+const maxResolveRefs = 50000
+
+// bulkIPThreshold switches IP resolution from one field-selector List per IP
+// (cheap for a handful) to a single paged scan of all pods (one pass, bounded
+// memory) once there are more IPs than this — avoiding N thousand API calls.
+const bulkIPThreshold = 100
 
 // ResolveNamespaces maps each resource ref to the namespace(s) it lives in,
-// using in-cluster reads run in parallel (a flow capture can carry hundreds of
-// distinct IPs; resolving them sequentially blows the request timeout).
-// Fail-closed: any API error aborts the whole resolve.
+// using in-cluster reads. IP refs beyond bulkIPThreshold are resolved with one
+// paged pod scan; everything else runs in parallel per-ref. Fail-closed: any
+// API error aborts the whole resolve.
 func (k *Kube) ResolveNamespaces(ctx context.Context, refs []ResourceRef) (map[string][]string, error) {
 	if len(refs) > maxResolveRefs {
 		return nil, fmt.Errorf("too many refs (%d > %d); narrow the query", len(refs), maxResolveRefs)
 	}
 
+	out := make(map[string][]string, len(refs))
+
+	// Split IP refs out for possible bulk resolution.
+	var ips []string
+	var rest []ResourceRef
+	for _, r := range refs {
+		if r.Kind == "ip" {
+			ips = append(ips, r.Value)
+		} else {
+			rest = append(rest, r)
+		}
+	}
+
+	if len(ips) > bulkIPThreshold {
+		idx, err := k.resolveIPsBulk(ctx, ips)
+		if err != nil {
+			return nil, err
+		}
+		for ip, ns := range idx {
+			out[ip] = ns
+		}
+	} else {
+		for _, ip := range ips {
+			rest = append(rest, ResourceRef{Kind: "ip", Value: ip})
+		}
+	}
+
+	if len(rest) > 0 {
+		perRef, err := k.resolvePerRef(ctx, rest)
+		if err != nil {
+			return nil, err
+		}
+		for v, ns := range perRef {
+			out[v] = ns
+		}
+	}
+	return out, nil
+}
+
+// resolvePerRef resolves refs one API call each, in parallel (bounded).
+func (k *Kube) resolvePerRef(ctx context.Context, refs []ResourceRef) (map[string][]string, error) {
 	type result struct {
 		value string
 		ns    []string
@@ -231,6 +283,56 @@ func (k *Kube) ResolveNamespaces(ctx context.Context, refs []ResourceRef) (map[s
 		}
 	}
 	return out, nil
+}
+
+// resolveIPsBulk resolves many IPs with a single paged scan of all pods,
+// indexing only the wanted IPs (memory bounded by the page + the want set).
+// Stops early once every wanted IP is found. Matches primary and secondary
+// (dual-stack) pod IPs.
+func (k *Kube) resolveIPsBulk(ctx context.Context, ips []string) (map[string][]string, error) {
+	want := make(map[string]bool, len(ips))
+	for _, ip := range ips {
+		want[ip] = true
+	}
+	out := make(map[string][]string, len(ips))
+	cont := ""
+	for {
+		list, err := k.client.CoreV1().Pods(metav1.NamespaceAll).List(ctx,
+			metav1.ListOptions{Limit: 1000, Continue: cont})
+		if err != nil {
+			return nil, fmt.Errorf("bulk resolve pods: %w", err)
+		}
+		for i := range list.Items {
+			p := &list.Items[i]
+			for _, podIP := range podIPsOf(p) {
+				if want[podIP] {
+					out[podIP] = uniqueNamespaces(append(out[podIP], p.Namespace))
+				}
+			}
+		}
+		cont = list.Continue
+		if cont == "" || len(out) == len(want) {
+			break
+		}
+	}
+	return out, nil
+}
+
+// podIPsOf returns a pod's IPs (primary + dual-stack secondaries).
+func podIPsOf(p *corev1.Pod) []string {
+	if len(p.Status.PodIPs) > 0 {
+		ips := make([]string, 0, len(p.Status.PodIPs))
+		for _, pip := range p.Status.PodIPs {
+			if pip.IP != "" {
+				ips = append(ips, pip.IP)
+			}
+		}
+		return ips
+	}
+	if p.Status.PodIP != "" {
+		return []string{p.Status.PodIP}
+	}
+	return nil
 }
 
 func (k *Kube) resolveOne(ctx context.Context, ref ResourceRef) ([]string, error) {
