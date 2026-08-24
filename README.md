@@ -90,3 +90,18 @@ granting:
 
 The `AUTH_TOKEN` must be the **same value** in every region and in the bot's
 `MCP_AUTHZ_TOKEN`.
+
+## POST /v1/authenticate
+
+Verifies a caller-supplied bearer token (an OpenShift user token or a
+ServiceAccount token) with a TokenReview and returns the identity the API
+server resolved it to:
+
+```json
+{"token": "<caller token>"}
+-> {"authenticated": true, "user": "system:serviceaccount:team-a:ci", "groups": ["system:serviceaccounts", "system:serviceaccounts:team-a"]}
+```
+
+This is how the bot authenticates HTTP API callers without holding any cluster
+credentials. Requires `create` on `authentication.k8s.io/tokenreviews`. The
+presented token is never logged or stored.

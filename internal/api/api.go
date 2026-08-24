@@ -6,6 +6,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 // Handler serves the authorization API.
 type Handler struct {
+	authn    authz.Authenticator // optional (nil disables /v1/authenticate)
 	lister   authz.NamespaceLister
 	resolver authz.NamespaceResolver // optional (nil disables /v1/resolve)
 	action   authz.Action
@@ -24,7 +26,13 @@ type Handler struct {
 
 // New builds the API handler. resolver may be nil (no /v1/resolve).
 func New(lister authz.NamespaceLister, resolver authz.NamespaceResolver, action authz.Action, token string, log *slog.Logger) *Handler {
-	return &Handler{lister: lister, resolver: resolver, action: action, token: token, log: log}
+	h := &Handler{lister: lister, resolver: resolver, action: action, token: token, log: log}
+	// The kube backend can also authenticate tokens (TokenReview); other
+	// backends simply do not expose /v1/authenticate.
+	if a, ok := lister.(authz.Authenticator); ok {
+		h.authn = a
+	}
+	return h
 }
 
 // Routes registers the endpoints on a mux.
@@ -33,6 +41,9 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/authorize", h.auth(h.authorize))
 	if h.resolver != nil {
 		mux.HandleFunc("POST /v1/resolve", h.auth(h.resolve))
+	}
+	if h.authn != nil {
+		mux.HandleFunc("POST /v1/authenticate", h.auth(h.authenticate))
 	}
 }
 
@@ -123,6 +134,47 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, authorizeResponse{Allowed: true})
+}
+
+type authenticateRequest struct {
+	// Token is a bearer token issued by THIS cluster (an OpenShift user token or
+	// a ServiceAccount token).
+	Token string `json:"token"`
+}
+
+type authenticateResponse struct {
+	Authenticated bool     `json:"authenticated"`
+	User          string   `json:"user,omitempty"`
+	Groups        []string `json:"groups,omitempty"`
+}
+
+// authenticate verifies a caller-supplied token via TokenReview and returns the
+// identity it belongs to. The caller (the bot) holds no cluster credentials, so
+// this is how it turns a user's or ServiceAccount's token into an identity it
+// can then scope. The presented token is never logged or stored.
+func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) {
+	var req authenticateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if strings.TrimSpace(req.Token) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "token is required"})
+		return
+	}
+	sub, err := h.authn.Authenticate(r.Context(), req.Token)
+	if err != nil {
+		if errors.Is(err, authz.ErrUnauthenticated) {
+			// Not an error condition for this service: the token simply is not
+			// valid on this cluster. Never log the token itself.
+			writeJSON(w, http.StatusOK, authenticateResponse{Authenticated: false})
+			return
+		}
+		h.log.Error("authenticate", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "authentication backend unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, authenticateResponse{Authenticated: true, User: sub.User, Groups: sub.Groups})
 }
 
 type resolveRequest struct {

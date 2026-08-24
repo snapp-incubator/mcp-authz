@@ -75,6 +75,17 @@ type ClusterWideChecker interface {
 	IsClusterWide(ctx context.Context, sub Subject, act Action) (bool, error)
 }
 
+// Authenticator is an optional capability: verify a bearer token issued by this
+// cluster and return the identity it belongs to. Lets a caller that holds no
+// cluster credentials (the bot) authenticate a user or ServiceAccount token
+// without ever seeing a kubeconfig.
+type Authenticator interface {
+	Authenticate(ctx context.Context, token string) (Subject, error)
+}
+
+// ErrUnauthenticated means the token was rejected by the cluster.
+var ErrUnauthenticated = errors.New("token is not authenticated by this cluster")
+
 // ResourceRef names a cluster resource whose namespace the caller wants
 // resolved. Kind is pod | service | ip | namespace; Value is the name or IP.
 type ResourceRef struct {

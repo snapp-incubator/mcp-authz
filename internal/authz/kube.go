@@ -3,9 +3,11 @@ package authz
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	authnv1 "k8s.io/api/authentication/v1"
 	authzv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -180,6 +182,32 @@ func (k *Kube) ListAllowed(ctx context.Context, sub Subject, act Action) ([]stri
 		return nil, firstErr
 	}
 	return allowed, nil
+}
+
+// Authenticate verifies a bearer token with a TokenReview and returns the
+// identity the API server resolved it to. Works for both human OIDC tokens and
+// ServiceAccount tokens (a SA authenticates as
+// system:serviceaccount:<namespace>:<name> with the system:serviceaccounts
+// groups), so authorization downstream is identical for both.
+//
+// Needs `create` on authentication.k8s.io/tokenreviews.
+func (k *Kube) Authenticate(ctx context.Context, token string) (Subject, error) {
+	if strings.TrimSpace(token) == "" {
+		return Subject{}, ErrUnauthenticated
+	}
+	tr := &authnv1.TokenReview{Spec: authnv1.TokenReviewSpec{Token: token}}
+	resp, err := k.client.AuthenticationV1().TokenReviews().Create(ctx, tr, metav1.CreateOptions{})
+	if err != nil {
+		return Subject{}, fmt.Errorf("tokenreview: %w", err)
+	}
+	if !resp.Status.Authenticated {
+		return Subject{}, ErrUnauthenticated
+	}
+	u := resp.Status.User
+	if strings.TrimSpace(u.Username) == "" {
+		return Subject{}, ErrUnauthenticated
+	}
+	return Subject{User: u.Username, Groups: u.Groups}, nil
 }
 
 // IsClusterWide reports whether the subject may perform the action at cluster
