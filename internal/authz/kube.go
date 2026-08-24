@@ -97,13 +97,15 @@ func (k *Kube) Name() string { return "kube" }
 func (k *Kube) Authorize(ctx context.Context, sub Subject, act Action, ns string) (Decision, error) {
 	act = withDefaults(act)
 	var resolved []string
-	if k.groups != nil {
+	// ServiceAccounts are never members of OpenShift Group objects; their groups
+	// arrive with the identity (TokenReview), so skip the lookup entirely.
+	if k.groups != nil && !IsServiceAccount(sub.User) {
 		resolved = k.groups.groupsFor(ctx, sub.User)
 	}
 	sar := &authzv1.SubjectAccessReview{
 		Spec: authzv1.SubjectAccessReviewSpec{
 			User:   sub.User,
-			Groups: subjectGroups(sub.Groups, resolved),
+			Groups: subjectGroups(sub.User, sub.Groups, resolved),
 			ResourceAttributes: &authzv1.ResourceAttributes{
 				Namespace: ns,
 				Verb:      act.Verb,

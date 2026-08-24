@@ -3,6 +3,7 @@ package authz
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 )
@@ -68,10 +69,25 @@ func parseGroups(data []byte) map[string][]string {
 	return m
 }
 
-// subjectGroups returns the full group set for a SAR: the caller-supplied groups,
-// the user's resolved OpenShift groups, and the implicit authenticated groups,
-// de-duplicated.
-func subjectGroups(passed, resolved []string) []string {
+// IsServiceAccount reports whether a username is a Kubernetes ServiceAccount
+// (system:serviceaccount:<namespace>:<name>).
+func IsServiceAccount(user string) bool {
+	return strings.HasPrefix(user, "system:serviceaccount:")
+}
+
+// subjectGroups returns the full group set for a SAR: the caller-supplied
+// groups, the user's resolved OpenShift groups, and the implicit authenticated
+// groups, de-duplicated.
+//
+// ServiceAccounts are handled separately: their groups come from the API server
+// itself (TokenReview returns system:serviceaccounts[:<ns>] and
+// system:authenticated) and they are never members of OpenShift Group objects.
+// Adding the human implicit groups to a SA would claim a membership it does not
+// have — a RoleBinding to system:authenticated:oauth would then appear to grant
+// the SA access the API server would refuse. Over-granting here would break the
+// guarantee that a caller never sees more than `oc` shows them, so for a SA only
+// the API-server-supplied groups are trusted.
+func subjectGroups(user string, passed, resolved []string) []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(gs []string) {
@@ -83,6 +99,9 @@ func subjectGroups(passed, resolved []string) []string {
 		}
 	}
 	add(passed)
+	if IsServiceAccount(user) {
+		return out
+	}
 	add(resolved)
 	add(implicitGroups)
 	return out
