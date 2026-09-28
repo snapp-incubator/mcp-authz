@@ -36,7 +36,7 @@ is set.
 
 ```
 GET  /v1/namespaces?user=<email>[&groups=a,b]
-  -> {"user":"<email>","namespaces":["team-a","team-b"]}
+  -> {"user":"<email>","namespaces":["team-a","team-b"],"clusterWide":false}
 
 POST /v1/authorize
   {"user":"<email>","namespaces":["team-a"]}
@@ -46,6 +46,10 @@ POST /v1/resolve             # map resources -> namespace(s) (kube backend only)
   {"refs":[{"kind":"ip","value":"10.0.0.5"},{"kind":"pod","value":"web-0"}]}
   -> {"namespaces":{"10.0.0.5":["team-a"],"web-0":["team-a","team-b"]}}
 
+POST /v1/authenticate        # verify a caller's own token (see below)
+  {"token":"<caller token>"}
+  -> {"authenticated":true,"user":"system:serviceaccount:team-a:ci","groups":[...]}
+
 GET  /healthz  /readyz
 ```
 
@@ -54,9 +58,31 @@ GET  /healthz  /readyz
 bot checks those against the user's scope. Kinds: `pod`, `service`, `ip`,
 `namespace`.
 
+`clusterWide` is a second SubjectAccessReview with an empty namespace: true when
+the user may perform the action at cluster scope. It is how the caller decides
+whether to expose cluster-infrastructure data (nodes, BGP, agent status) at all —
+a namespace list cannot express "all of them, and the cluster itself". A backend
+that cannot answer it, or an error while asking, reports `false`.
+
 Identity arrives as a parameter from the trusted caller (the bot); the bearer
 token gates who may call. Groups are resolved server-side, so the `groups` param
 is optional (merged with the resolved set).
+
+## How the bot uses it
+
+Every question resolves the asker's scope here before anything else happens: one
+call per cluster, in parallel, cached two minutes on the bot's side. The answer
+decides three separate things — which namespaces a tool argument may name, which
+records survive the result filter, and whether the cluster-admin tools are
+offered at all. Nothing is stored: a schedule or a marked alert channel keeps
+*who* created it, and their access is resolved again before every run, so
+revoking RBAC takes effect on the next run rather than needing a second edit
+somewhere else.
+
+`/v1/authenticate` serves the bot's HTTP API, where the caller presents their own
+OpenShift token rather than arriving over Mattermost. `/v1/resolve` serves the
+result filter, which has to gate output that names only a pod, a service or a
+bare IP.
 
 ## Configuration
 
