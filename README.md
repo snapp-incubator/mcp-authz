@@ -58,11 +58,18 @@ GET  /healthz  /readyz
 bot checks those against the user's scope. Kinds: `pod`, `service`, `ip`,
 `namespace`.
 
-`clusterWide` is a second SubjectAccessReview with an empty namespace: true when
-the user may perform the action at cluster scope. It is how the caller decides
-whether to expose cluster-infrastructure data (nodes, BGP, agent status) at all —
-a namespace list cannot express "all of them, and the cluster itself". A backend
-that cannot answer it, or an error while asking, reports `false`.
+`clusterWide` is a second SubjectAccessReview with an empty namespace — "may
+this subject perform the action at cluster scope?" — asked because a namespace
+list cannot express it: holding every namespace is not the same as holding the
+cluster. A backend that cannot answer it, or an error while asking, reports
+`false`.
+
+It is a signal, not a capability. This service grants nothing either way; it
+reports what the cluster said. The caller decides what to do with it — in the
+bot's case, whether to offer the tools whose output has no namespace to filter
+to (nodes, BGP, the Cilium datapath, label enumeration). A caller that sees
+`clusterWide: true` still gets the same `namespaces` list, which for an admin
+simply contains everything, so scoping ordinary requests needs no special case.
 
 Identity arrives as a parameter from the trusted caller (the bot); the bearer
 token gates who may call. Groups are resolved server-side, so the `groups` param
